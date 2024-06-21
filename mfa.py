@@ -10,7 +10,7 @@ class MFA(torch.nn.Module):
     """
     A class representing a Mixture of Factor Analyzers [1] / Mixture of Probabilistic PCA [2] in pytorch.
     MFA/MPPCA are Gaussian Mixture Models with low-rank-plus-diagonal covariance, enabling efficient modeling
-    of high-dimensional domains in which the data resoides near lower-dimensional subspaces.
+    of high-dimensional domains in which the data resides near lower-dimensional subspaces.
     The implementation is based on [3] (please quote this if you are using this package in your research).
 
     Attributes (model parameters):
@@ -247,7 +247,7 @@ class MFA(torch.nn.Module):
             print('Performing K-means clustering of {} samples in dimension {} to {} clusters...'.format(
                 x.shape[0], sampled_features.size, K))
             _x = x[:, sampled_features].cpu().numpy()
-            clusters = KMeans(n_clusters=K, max_iter=300, n_jobs=-1).fit(_x)
+            clusters = KMeans(n_clusters=K, max_iter=300).fit(_x)
             print('... took {} sec'.format(time.time() - t))
             component_samples = [clusters.labels_ == i for i in range(K)]
         elif self.init_method == 'rnd_samples':
@@ -303,6 +303,7 @@ class MFA(torch.nn.Module):
             sigma_2_new = (trace_S_i - t1)/d
             return mu_i, A_i_new, torch.log(sigma_2_new) * torch.ones_like(self.log_D[i])
 
+        ll_log = []
         for it in range(max_iterations):
             t = time.time()
             sampled_features = np.random.choice(d, int(d*feature_sampling)) if feature_sampling else None
@@ -313,9 +314,11 @@ class MFA(torch.nn.Module):
             self.A.data = new_params[1]
             self.log_D.data = new_params[2]
             self.PI_logits.data = torch.log(r_sum / torch.sum(r_sum))
-            ll = round(torch.mean(self.log_prob(x)).item(), 1) if it % 5 == 0 else '.....'
+            ll = round(torch.mean(self.log_prob(x)).item(), 1) #if it % 5 == 0 else '.....'
             print('Iteration {}/{}, train log-likelihood = {}, took {:.1f} sec'.format(it, max_iterations, ll,
                                                                                    time.time()-t))
+            ll_log.append(ll)
+        return ll_log
 
     def batch_fit(self, train_dataset, test_dataset=None, batch_size=1000, test_size=1000, max_iterations=20,
                   feature_sampling=False):
@@ -440,13 +443,16 @@ class MFA(torch.nn.Module):
         for epoch in range(max_epochs):
             t = time.time()
             for idx, (batch_x, _) in enumerate(loader):
-                print('.', end='', flush=True)
+                #print('.', end='', flush=True)
                 if idx > 0 and idx%100 == 0:
-                    print(torch.mean(self.log_prob(test_samples)).item())
+                    print("Iteration {}".format(idx))
+                    print("Loss {:.8f}".format(torch.mean(self.log_prob(test_samples)).item()))
+                    #print(torch.mean(self.log_prob(test_samples)).item())
                 sampled_features = np.random.choice(d, int(d*feature_sampling)) if feature_sampling else None
                 batch_x = batch_x.to(self.MU.device)
                 optimizer.zero_grad()
                 loss = -self.log_likelihood(batch_x, sampled_features=sampled_features) / batch_size
+                #loss = -torch.mean(self.log_prob(test_samples, sampled_features=sampled_features))
                 loss.backward()
                 optimizer.step()
             ll_log.append(torch.mean(self.log_prob(test_samples)).item())

@@ -9,6 +9,8 @@ from matplotlib import pyplot as plt
 from imageio import imwrite
 from packaging import version
 
+from PIL import Image
+
 """
 MFA model training (data fitting) example.
 Note that actual EM (and SGD) training code are part of the MFA class itself.
@@ -18,7 +20,8 @@ Note that actual EM (and SGD) training code are part of the MFA class itself.
 def main(argv):
     assert version.parse(torch.__version__) >= version.parse('1.2.0')
 
-    dataset = argv[1] if len(argv) == 2 else 'celeba'
+    #dataset = argv[1] if len(argv) == 2 else 'celeba'
+    dataset = 'mnist'
     print('Preparing dataset and parameters for', dataset, '...')
 
     if dataset == 'celeba':
@@ -50,6 +53,7 @@ def main(argv):
         assert False, 'Unknown dataset: ' + dataset
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    #device = 'cpu'
     model_dir = './models/'+dataset
     os.makedirs(model_dir, exist_ok=True)
     figures_dir = './figures/'+dataset
@@ -63,6 +67,9 @@ def main(argv):
     print('EM fitting: {} components / {} factors / batch size {} ...'.format(n_components, n_factors, batch_size))
     ll_log = model.batch_fit(train_set, test_set, batch_size=batch_size, max_iterations=num_iterations,
                              feature_sampling=feature_sampling)
+    
+    #tensor_dataset = torch.tensor(train_set.data.flatten(start_dim=1), dtype=torch.float32)
+    #ll_log = model.fit(tensor_dataset, max_iterations=10, feature_sampling=feature_sampling)
 
     if mfa_sgd_epochs > 0:
         print('Continuing training using SGD with diagonal (instead of isotropic) noise covariance...')
@@ -76,12 +83,19 @@ def main(argv):
 
     print('Visualizing the trained model...')
     model_image = visualize_model(model, image_shape=image_shape, end_component=10)
-    imwrite(os.path.join(figures_dir, 'model_'+model_name+'.jpg'), model_image)
+
+    image = Image.fromarray((255 * model_image).astype(np.uint8))
+    #image = Image.fromarray(image_data_uint8)
+    image.save(os.path.join(figures_dir, 'model_'+model_name+'.png'))
+    #imwrite(os.path.join(figures_dir, 'model_'+model_name+'.jpg'), model_image)
 
     print('Generating random samples...')
     rnd_samples, _ = model.sample(100, with_noise=False)
     mosaic = samples_to_mosaic(rnd_samples, image_shape=image_shape)
-    imwrite(os.path.join(figures_dir, 'samples_'+model_name+'.jpg'), mosaic)
+
+    image = Image.fromarray((255 * mosaic).astype(np.uint8))
+    image.save(os.path.join(figures_dir, 'samples_'+model_name+'.png'))
+    #imwrite(os.path.join(figures_dir, 'samples_'+model_name+'.jpg'), mosaic)
 
     print('Plotting test log-likelihood graph...')
     plt.plot(ll_log, label='c{}_l{}_b{}'.format(n_components, n_factors, batch_size))
