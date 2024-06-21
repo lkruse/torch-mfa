@@ -6,8 +6,6 @@ import numpy as np
 from mfa import MFA
 from utils import CropTransform, ReshapeTransform, samples_to_mosaic, visualize_model
 from matplotlib import pyplot as plt
-from imageio import imwrite
-from packaging import version
 
 from PIL import Image
 
@@ -18,10 +16,9 @@ Note that actual EM (and SGD) training code are part of the MFA class itself.
 
 
 def main(argv):
-    assert version.parse(torch.__version__) >= version.parse('1.2.0')
 
     #dataset = argv[1] if len(argv) == 2 else 'celeba'
-    dataset = 'mnist'
+    dataset = 'celeba'
     print('Preparing dataset and parameters for', dataset, '...')
 
     if dataset == 'celeba':
@@ -29,10 +26,10 @@ def main(argv):
         n_components = 300              # Number of components in the mixture model
         n_factors = 10                  # Number of factors - the latent dimension (same for all components)
         batch_size = 1000               # The EM batch size
-        num_iterations = 30             # Number of EM iterations (=epochs)
+        num_iterations = 5              # Number of EM iterations (=epochs)
         feature_sampling = 0.2          # For faster responsibilities calculation, randomly sample the coordinates (or False)
-        mfa_sgd_epochs = 0              # Perform additional training with diagonal (per-pixel) covariance, using SGD
-        init_method = 'rnd_samples'   # Initialize each component from few random samples using PPCA
+        mfa_sgd_epochs = 5              # Perform additional training with diagonal (per-pixel) covariance, using SGD
+        init_method = 'rnd_samples'     # Initialize each component from few random samples using PPCA
         trans = transforms.Compose([CropTransform((25, 50, 25+128, 50+128)), transforms.Resize(image_shape[0]),
                                     transforms.ToTensor(),  ReshapeTransform([-1])])
         train_set = CelebA(root='./data', split='train', transform=trans, download=True)
@@ -53,7 +50,6 @@ def main(argv):
         assert False, 'Unknown dataset: ' + dataset
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-    #device = 'cpu'
     model_dir = './models/'+dataset
     os.makedirs(model_dir, exist_ok=True)
     figures_dir = './figures/'+dataset
@@ -83,25 +79,22 @@ def main(argv):
 
     print('Visualizing the trained model...')
     model_image = visualize_model(model, image_shape=image_shape, end_component=10)
-
     image = Image.fromarray((255 * model_image).astype(np.uint8))
-    #image = Image.fromarray(image_data_uint8)
     image.save(os.path.join(figures_dir, 'model_'+model_name+'.png'))
-    #imwrite(os.path.join(figures_dir, 'model_'+model_name+'.jpg'), model_image)
 
     print('Generating random samples...')
     rnd_samples, _ = model.sample(100, with_noise=False)
     mosaic = samples_to_mosaic(rnd_samples, image_shape=image_shape)
-
     image = Image.fromarray((255 * mosaic).astype(np.uint8))
     image.save(os.path.join(figures_dir, 'samples_'+model_name+'.png'))
-    #imwrite(os.path.join(figures_dir, 'samples_'+model_name+'.jpg'), mosaic)
 
     print('Plotting test log-likelihood graph...')
     plt.plot(ll_log, label='c{}_l{}_b{}'.format(n_components, n_factors, batch_size))
     plt.grid(True)
     plt.savefig(os.path.join(figures_dir, 'training_graph_'+model_name+'.jpg'))
-    print('Done')
+    print('Done.')
 
 if __name__ == "__main__":
     main(sys.argv)
+
+
