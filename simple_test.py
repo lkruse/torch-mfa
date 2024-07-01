@@ -7,31 +7,39 @@ from torch.utils.data import DataLoader, Dataset
 from mfa import MFA
 
 n_samples = 1000
-n_latent = 2
 n_features = 6
+n_latent = 2
+n_components = 3
 noise_variance = 0.1
-n_components = 2
 
-def generate_toy_data(n_samples=1000, n_features=6, n_latent=2, noise_variance=0.1, seed=0):
+
+def generate_mppca_data(n_samples=1000, n_features=6, n_latent=2, n_components=2, noise_variance=0.1, seed=0):
     torch.manual_seed(seed)  # for reproducibility
     # generate latent variables
     Z = torch.randn((n_samples, n_latent))
-    # create a random linear transformation matrix
-    W = torch.randn((n_latent, n_features))
-    # create mean vector
-    mu = torch.randn((n_features))
-    # map latent variables to observed space
-    X_clean = Z @ W + mu
-    # add Gaussian noise
-    noise = noise_variance * torch.randn((n_samples, n_features))
-    X = X_clean + noise
+    # create a random linear transformation matrix for each component
+    W = torch.randn((n_components, n_latent, n_features))
+    # create a mean vector for each component
+    mu = torch.randn((n_components, n_features))
+    # define the mixture component weights (assumed uniform for example)
+    mixture_weights = torch.ones((n_components,)) / n_components
+    # sample random component assignments
+    component_assignments = torch.multinomial(mixture_weights, n_samples, replacement=True)
+
+    # generate data for each component
+    X = torch.zeros(n_samples, n_features)
+    for k in range(n_components):
+        mask = (component_assignments == k)
+        Z_k = Z[mask]
+        if Z_k.shape[0] > 0:
+            X_clean = torch.matmul(Z_k, W[k, ...]) + mu[k, :]
+            noise = torch.randn(Z_k.size(0), n_features) * noise_variance
+            X[mask] = X_clean + noise
 
     return X
 
 #%%
-# Generate the data
-X = generate_toy_data(n_samples, n_features, n_latent, noise_variance)
-
+X = generate_mppca_data(n_samples, n_features, n_latent, n_components, noise_variance, seed = 0)
 
 # Create a figure and a set of subplots
 fig, axes = plt.subplots(n_features, n_features, figsize=(15, 15))
@@ -56,25 +64,38 @@ plt.show()
 
 # wrap the dataset in a PyTorch DataLoader
 class ToyDataset(Dataset):
-    def __init__(self, data):
+    def __init__(self, data, labels):
         self.data = torch.tensor(data, dtype=torch.float32)
+        self.labels = torch.tensor(labels, dtype=torch.long)
         
     def __len__(self):
         return len(self.data)
     
     def __getitem__(self, idx):
-        return self.data[idx]
+        return self.data[idx], self.labels[idx]
 
 # Create a dataset and dataloader
-dataset = ToyDataset(X)
+y = torch.randint(10, (n_samples,))
+dataset = ToyDataset(X, y)
 dataloader = DataLoader(dataset, batch_size=32, shuffle=True, drop_last=True)
 
-#%%
-model = MFA(n_components=n_components, n_features=n_features, n_factors=n_latent,
-            init_method=init_method).to(device=device)
+
+
 
 #%%
-# Example of iterating through the dataloader
-for batch in dataloader:
-    print(batch)
-    break
+X = generate_mppca_data(n_samples, n_features, n_latent, n_components, noise_variance, seed = 0)
+y = torch.randint(10, (n_samples,))
+train_dataset = ToyDataset(X, y)
+
+X = generate_mppca_data(n_samples, n_features, n_latent, n_components, noise_variance, seed = 1)
+y = torch.randint(10, (n_samples,))
+test_dataset = ToyDataset(X, y)
+
+
+model = MFA(n_components=n_components, n_features=n_features, n_factors=n_latent,
+            init_method='kmeans')
+
+#%%
+ll_log = model.batch_fit(train_dataset, test_dataset, batch_size=100, max_iterations=10,
+                             feature_sampling=False)
+# %%
