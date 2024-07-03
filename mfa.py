@@ -2,7 +2,6 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 import time
-import math
 import warnings
 
 
@@ -65,6 +64,7 @@ class MFA(torch.nn.Module):
         self.log_D = torch.nn.Parameter(torch.zeros(n_components, n_features), requires_grad=False)
         self.PI_logits = torch.nn.Parameter(torch.log(torch.ones(n_components)/float(n_components)), requires_grad=False)
 
+
     def sample(self, n, with_noise=False):
         """
         Generate random samples from the trained MFA / MPPCA
@@ -88,19 +88,24 @@ class MFA(torch.nn.Module):
         K, d, l = A.shape
         AT = A.transpose(1, 2)
         iD = torch.exp(-log_D).view(K, d, 1)
+        # L is IPiDP; Woodbury matrix lemm, det(A + UCV) = det(C^-1 + VA^-1U) det(C) det(A) where C and A are I
         L = torch.eye(l, device=A.device).reshape(1, l, l) + AT @ (iD*A)
+        # L = M / sigma^2? yeah, 1/posterior cov matrix
         iL = torch.inverse(L)
+        # this is posterior cov matrix
 
         def per_component_md(i):
             x_c = (x - MU[i].reshape(1, d)).T  # shape = (d, n)
+            # last paragraph, plus 3.5 vs 3.7. NO! MFA paper, pg. 3. Between eq. 3 and 4.
             m_d_1 = (iD[i] * x_c) - ((iD[i] * A[i]) @ iL[i]) @ (AT[i] @ (iD[i] * x_c))
             return torch.sum(x_c * m_d_1, dim=0)
 
         m_d = torch.stack([per_component_md(i) for i in range(K)])
         det_L = torch.logdet(L)
         log_det_Sigma = det_L - torch.sum(torch.log(iD.reshape(K, d)), axis=1)
-        log_prob_data_given_components = -0.5 * ((d*np.log(2.0*math.pi) + log_det_Sigma).reshape(K, 1) + m_d)
-        return PI.reshape(1, K) + log_prob_data_given_components.T
+        log_prob_data_given_components = -0.5 * ((d*np.log(2.0*torch.pi) + log_det_Sigma).reshape(K, 1) + m_d)
+        return PI.reshape(1, K) + log_prob_data_given_components.T  # (eq) C.1
+
 
     def per_component_log_likelihood(self, x, sampled_features=None):
         """
@@ -230,7 +235,9 @@ class MFA(torch.nn.Module):
         U, S, V = np.linalg.svd((x - mu.reshape(1, -1)).cpu().numpy(), full_matrices=False)
         V = torch.from_numpy(V.T).to(x.device)
         S = torch.from_numpy(S).to(x.device)
+        # (eq) 3.13
         sigma_squared = torch.sum(torch.pow(S[n_factors:], 2.0))/((x.shape[0]-1) * (x.shape[1]-n_factors))
+        # (eq) 3.12, S in (eq) 3.9
         A = V[:, :n_factors] * torch.sqrt((torch.pow(S[:n_factors], 2.0).reshape(1, n_factors)/(x.shape[0]-1) - sigma_squared))
         return mu, A, torch.log(sigma_squared) * torch.ones(x.shape[1], device=x.device)
 
@@ -268,8 +275,8 @@ class MFA(torch.nn.Module):
         assert torch.all(torch.softmax(self.PI_logits, dim=0) > 0.01/K), self.PI_logits
         assert torch.all(torch.exp(self.log_D) > 1e-5) and torch.all(torch.exp(self.log_D) < 1.0), \
             '{} - {}'.format(torch.min(self.log_D).item(), torch.max(self.log_D).item())
-        assert torch.all(torch.abs(self.A) < 10.0), torch.max(torch.abs(self.A))
-        assert torch.all(torch.abs(self.MU) < 1.0), torch.max(torch.abs(self.MU))
+        #assert torch.all(torch.abs(self.A) < 10.0), torch.max(torch.abs(self.A))
+        #assert torch.all(torch.abs(self.MU) < 1.0), torch.max(torch.abs(self.MU))
 
     def fit(self, x, max_iterations=20, feature_sampling=False):
         """

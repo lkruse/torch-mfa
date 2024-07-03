@@ -18,7 +18,7 @@ Note that actual EM (and SGD) training code are part of the MFA class itself.
 def main(argv):
 
     #dataset = argv[1] if len(argv) == 2 else 'celeba'
-    dataset = 'celeba'
+    dataset = 'mnist'
     print('Preparing dataset and parameters for', dataset, '...')
 
     if dataset == 'celeba':
