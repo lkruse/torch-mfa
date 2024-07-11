@@ -305,10 +305,11 @@ class MFA(torch.nn.Module):
             SiAi = (1.0/r_sum[i]) * (r[:, [i]]*x_c).T @ (x_c @ self.A[i])
             invM_AT_Si_Ai = inv_M_i @ self.A[i].T @ SiAi
             A_i_new = SiAi @ torch.inverse(s2_I + invM_AT_Si_Ai)
-            t1 = torch.trace(A_i_new.T @ (SiAi @ inv_M_i))
-            trace_S_i = torch.sum(N/r_sum[i] * torch.mean(r[:, [i]]*x_c*x_c, dim=0))
-            sigma_2_new = (trace_S_i - t1)/d
+            t1 = torch.trace(A_i_new.T @ (SiAi @ inv_M_i))   # (eq) 6 in [2]
+            trace_S_i = torch.sum(N/r_sum[i] * torch.mean(r[:, [i]]*x_c*x_c, dim=0)) # (eq) 6 in [2]
+            sigma_2_new = (trace_S_i - t1)/d # (eq) 6 in [2]
             return mu_i, A_i_new, torch.log(sigma_2_new) * torch.ones_like(self.log_D[i])
+
 
         ll_log = []
         for it in range(max_iterations):
