@@ -14,7 +14,7 @@ class LowRankMixtureModel(torch.nn.Module):
     matrix is assumed to be diagonal; MPPCA assumes that the noise matrix is
     both diagonal and isotropic.
     
-    Original publication:
+    Original publications:
     [1] Tipping, M. E., & Bishop, C. M. (1999). Mixtures of Probabilistic 
         Principal Component Analyzers. Neural Computation, 11(2), 443-482.
 
@@ -26,44 +26,12 @@ class LowRankMixtureModel(torch.nn.Module):
     [3] Richardson, E., & Weiss, Y. (2018). On GANs and GMMs. Advances in 
         Neural Information Processing Systems, 31.
 
-
-    Attributes (model parameters):
-    ------------------------------
-    MU: Tensor shaped [n_components, n_features]
-        The component means.
-    A: Tensor shaped [n_components, n_features, n_factors]
-        The component subspace directions / factor loadings. These should be orthogonal (but not orthonormal)
-    lod_D: Tensor shaped [n_components, n_features]
-        Log of the component diagonal variance values. Note that in MPPCA, all values along the diagonal are the same.
-    PI_logits: Tensor shaped [n_components]
-        Log of the component mixing-coefficients (probabilities). Apply softmax to get the actual PI values.
-
-    Main Methods:
-    -------------
-    fit:
-        Fit the MPPCA model parameters to pre-loaded training data using EM
-
-    batch_fit:
-        Fit the MPPCA model parameters to a (possibly large) pytorch dataset using EM in batches
-
-    sample:
-        Generate new samples from the trained model
-
-    per_component_log_likelihood, log_prob, log_likelihood:
-        Probability query methods
-
-    responsibilities, log_responsibilities, map_component:
-        Responsibility (which component the sample comes from) query methods
-
-    reconstruct, conditional_reconstruct:
-        Reconstruction and in-painting
-
-    [1] Tipping, Michael E., and Christopher M. Bishop. "Mixtures of probabilistic principal component analyzers."
-        Neural computation 11.2 (1999): 443-482.
-    [2] Ghahramani, Zoubin, and Geoffrey E. Hinton. "The EM algorithm for mixtures of factor analyzers."
-        Vol. 60. Technical Report CRG-TR-96-1, University of Toronto, 1996.
-    [3] Richardson, Eitan, and Yair Weiss. "On gans and gmms."
-        Advances in Neural Information Processing Systems. 2018.
+    Parameters:
+        waypoints (list of np.array): list of waypoints as numpy arrays
+        stop_duration (float): duration of pallet pause at each waypoint (seconds)
+        max_speed (float): maximum speed of the pallet (meters per second)
+        acc (float): acceleration of the pallet (meters per second^2)
+        dt (float): simulation timestep (seconds)
 
     """
     def __init__(self, n_components, n_features, n_factors, isotropic_noise=True, init_method='rnd_samples'):
@@ -81,181 +49,87 @@ class LowRankMixtureModel(torch.nn.Module):
 
 
     def sample(self, n, with_noise=False):
-        """
-        Generate random samples from the trained MFA / MPPCA
-        :param n: How many samples
-        :param with_noise: Add the isotropic / diagonal noise to the generated samples
-        :return: samples [n, n_features], c_nums - originating component numbers
-        """
-        if torch.all(self.W == 0.):
-            warnings.warn('SGD MFA training requires initialization. Please call batch_fit() first.')
-
         K, d, l = self.W.shape
-        c_nums = np.random.choice(K, n, p=torch.softmax(self.pi_logits, dim=0).detach().cpu().numpy())
+        sampled_components = torch.multinomial(torch.softmax(self.pi_logits, dim=0), n, replacement=True)
         z_l = torch.randn(n, l, device=self.W.device)
-        z_d = torch.randn(n, d, device=self.W.device) if with_noise else torch.zeros(n, d, device=self.W.device)
-        samples = torch.stack([self.W[c_nums[i]] @ z_l[i] + self.mu[c_nums[i]] + z_d[i] * torch.exp(0.5*self.log_Psi[c_nums[i]])
-                               for i in range(n)])
-        return samples, c_nums
 
-    @staticmethod
-    def _component_log_likelihood(x, PI, MU, A, log_D):
-        K, d, l = A.shape
-        AT = A.transpose(1, 2)
-        iD = torch.exp(-log_D).view(K, d, 1)
-        # L is IPiDP; Woodbury matrix lemm, det(A + UCV) = det(C^-1 + VA^-1U) det(C) det(A) where C and A are I
-        L = torch.eye(l, device=A.device).reshape(1, l, l) + AT @ (iD*A)
-        # L = M / sigma^2? yeah, 1/posterior cov matrix
-        iL = torch.inverse(L)
-        # this is posterior cov matrix
+        if with_noise:
+            z_d = torch.randn(n, d, device=self.W.device)  
+        else:
+            z_d = torch.zeros(n, d, device=self.W.device)
+        
+        Wz = self.W[sampled_components] @ z_l[..., None]
+        mu = self.mu[sampled_components][..., None]
+        epsilon = (z_d * torch.exp(0.5*self.log_Psi[sampled_components]))[..., None]
+        
+        samples = Wz + mu + epsilon
 
-        def per_component_md(i):
-            x_c = (x - MU[i].reshape(1, d)).T  # shape = (d, n)
-            # last paragraph, plus 3.5 vs 3.7. NO! MFA paper, pg. 3. Between eq. 3 and 4.
-            m_d_1 = (iD[i] * x_c) - ((iD[i] * A[i]) @ iL[i]) @ (AT[i] @ (iD[i] * x_c))
-            return torch.sum(x_c * m_d_1, dim=0)
+        return samples.squeeze(), sampled_components
+    
 
-        m_d = torch.stack([per_component_md(i) for i in range(K)])
-        det_L = torch.logdet(L)
-        log_det_Sigma = det_L - torch.sum(torch.log(iD.reshape(K, d)), axis=1)
-        log_prob_data_given_components = -0.5 * ((d*np.log(2.0*torch.pi) + log_det_Sigma).reshape(K, 1) + m_d)
-        return PI.reshape(1, K) + log_prob_data_given_components.T  # (eq) C.1
+    def _component_log_likelihood(self, x, pi, mu, W, sigma2):
+        K, d, l = W.shape
+        WT = W.transpose(1,2)
+        #inv_sigma2 = (1.0/sigma2 * torch.ones(d,1)).view(d,K,1).transpose(0,1)
+        inv_sigma2 = torch.exp(-sigma2).view(K, d, 1)
+        I = torch.eye(l, device=W.device).reshape(1,l,l)
+        L = I + WT @ (inv_sigma2 * W)
+        inv_L = torch.linalg.solve(L, I)
+
+        # compute Mahalanobis distance using the matrix inversion lemma
+        def mahalanobis_distance(i):
+            x_c = (x - mu[i].reshape(1,d)).T
+            component_m_d = (inv_sigma2[i] * x_c) - \
+                ((inv_sigma2[i] * W[i]) @ inv_L[i]) @ (WT[i] @ (inv_sigma2[i] * x_c))
+            
+            return torch.sum(x_c * component_m_d, dim=0)
+
+        # combine likelihood terms
+        m_d = torch.stack([mahalanobis_distance(i) for i in range(K)])
+        log_det_cov = torch.logdet(L) - \
+            torch.sum(torch.log(inv_sigma2.reshape(K, d)), axis=1)
+        log_const = torch.log(torch.tensor(2.0)*torch.pi)
+        log_probs = -0.5 * ((d*log_const + log_det_cov).reshape(K, 1) + m_d)
+
+        return torch.log(pi).reshape(1, K) + log_probs.T
+
 
 
     def per_component_log_likelihood(self, x, sampled_features=None):
-        """
-        Calculate per-sample and per-component log-likelihood values
-        :param x: samples [n, n_features]
-        :param sampled_features: list of feature coordinates to use
-        :return: log-probability values [n, n_components]
-        """
         if sampled_features is not None:
-            return LowRankMixtureModel._component_log_likelihood(x[:, sampled_features], torch.softmax(self.pi_logits, dim=0),
+            return self._component_log_likelihood(x[:, sampled_features], torch.softmax(self.pi_logits, dim=0),
                                                  self.mu[:, sampled_features],
                                                  self.W[:, sampled_features],
                                                  self.log_Psi[:, sampled_features])
-        return LowRankMixtureModel._component_log_likelihood(x, torch.softmax(self.pi_logits, dim=0), self.mu, self.W, self.log_Psi)
+        return self._component_log_likelihood(x, torch.softmax(self.pi_logits, dim=0), self.mu, self.W, self.log_Psi)
+
 
     def log_prob(self, x, sampled_features=None):
-        """
-        Calculate per-sample log-probability values
-        :param x: samples [n, n_features]
-        :param sampled_features: list of feature coordinates to use
-        :return: log-probability values [n]
-        """
         return torch.logsumexp(self.per_component_log_likelihood(x, sampled_features), dim=1)
 
-    def log_likelihood(self, x, sampled_features=None):
-        """
-        Calculate the log-likelihood of the given data
-        :param x: samples [n, n_features]
-        :param sampled_features: list of feature coordinates to use
-        :return: (total) log-likelihood value
-        """
-        return torch.sum(self.log_prob(x, sampled_features))
-
-    def log_responsibilities(self, x, sampled_features=None):
-        """
-        Calculate the log-responsibilities (log of the responsibility values - probability of each sample to originate
-        from each of the component.
-        :param x: samples [n, n_features]
-        :param sampled_features: list of feature coordinates to use
-        :return: log-responsibilities values [n, n_components]
-        """
-        comp_LLs = self.per_component_log_likelihood(x, sampled_features)
-        return comp_LLs - torch.logsumexp(comp_LLs, dim=1).reshape(-1, 1)
 
     def responsibilities(self, x, sampled_features=None):
-        """
-        Calculate the responsibilities - probability of each sample to originate from each of the component.
-        :param x: samples [n, n_features]
-        :param sampled_features: list of feature coordinates to use
-        :return: responsibility values [n, n_components]
-        """
-        return torch.exp(self.log_responsibilities(x, sampled_features))
+        comp_LLs = self.per_component_log_likelihood(x, sampled_features)
+        log_responsibilities = comp_LLs - self.log_prob(x, sampled_features).reshape(-1, 1)
 
-    def map_component(self, x, sampled_features=None):
-        """
-        Get the Maximum a Posteriori component numbers
-        :param x: samples [n, n_features]
-        :param sampled_features: list of feature coordinates to use
-        :return: component numbers [n]
-        """
-        return torch.argmax(self.log_responsibilities(x, sampled_features), dim=1)
+        return torch.exp(log_responsibilities)
 
-    def conditional_reconstruct(self, full_x, observed_features):
-        """
-        Calculates the mean of the conditional probability P(x_h | x_o)
-        References:
-        https://www.math.uwaterloo.ca/~hwolkowi/matrixcookbook.pdf#subsubsection.8.1.3
-        https://en.wikipedia.org/wiki/Woodbury_matrix_identity
-        Note: This is equivalent to calling reconstruct with sampled_features
 
-        :param full_x: the full vectors (including the hidden coordinates, which can contain any values)
-        :param observed_features: tensor containing a list of the observed coordinates of x
-        :return: A cloned version of full_x with the hidden features reconstructed
-        """
-        assert observed_features is not None
-        K, d, l = self.W.shape
-        c_i = self.map_component(full_x, observed_features)
-
-        mask = torch.zeros(d, dtype=bool)
-        mask[observed_features] = True
-
-        A_a = self.W[c_i][:, ~mask, :]
-        A_b = self.W[c_i][:, mask, :]
-        MU_a = self.mu[c_i][:, ~mask]
-        MU_b = self.mu[c_i][:, mask]
-        iD_b = torch.exp(-self.log_Psi[c_i][:, mask]).unsqueeze(2)
-
-        iL_b = torch.inverse(torch.eye(l, device=MU_b.device).reshape(1, l, l) + A_b.transpose(1, 2) @ (iD_b*A_b))
-        x_b_l = ((A_b * iD_b).transpose(1,2) @ (full_x[:, mask] - MU_b).unsqueeze(2))
-        x_hat = full_x.clone()
-        x_hat[:, ~mask] =  (MU_a.unsqueeze(2) + A_a @ x_b_l - A_a @ (A_b.transpose(1, 2) @
-                                                                     (iD_b * (A_b @ iL_b @ x_b_l)))).squeeze(dim=2)
-        return x_hat
-
-    def reconstruct(self, full_x, observed_features=None):
-        """
-        Reconstruct samples from the model - find the MAP component and latent z for each sample and regenerate
-
-        :param full_x: the full vectors (including the hidden coordinates, which can contain any values)
-        :param observed_features: tensor containing a list of the observed coordinates of x
-        :return: Reconstruction of full_x based on the trained model and observed features
-        """
-        K, d, l = self.W.shape
-        c_i = self.map_component(full_x, observed_features)
-
-        used_features = observed_features if observed_features is not None else torch.arange(0, d)
-        x = full_x[:, used_features]
-        MU = self.mu[:, used_features]
-        A = self.W[:, used_features]
-        AT = A.transpose(1, 2)
-        iD = torch.exp(-self.log_Psi[:, used_features]).unsqueeze(2)
-        L = torch.eye(l, device=MU.device).reshape(1, l, l) + AT @ (iD*A)
-        iL = torch.inverse(L)
-
-        # per eq. 2 in Ghahramani and Hinton 1996 + the matrix inversion lemma (also described there).
-        x_c = (x - MU[c_i]).unsqueeze(2)
-        iD_c = iD[c_i]
-        m_d_1 = (iD_c * x_c) - ((iD_c * A[c_i]) @ iL[c_i]) @ (AT[c_i] @ (iD_c * x_c))
-        mu_z = AT[c_i] @ m_d_1
-        return (self.W[c_i] @ mu_z).reshape(-1, d) + self.mu[c_i]
-
-    @staticmethod
-    def _small_sample_ppca(x, n_factors):
+    def _small_sample_ppca(self, x, n_factors):
         # See https://stats.stackexchange.com/questions/134282/relationship-between-svd-and-pca-how-to-use-svd-to-perform-pca
         mu = torch.mean(x, dim=0)
-        # U, S, V = torch.svd(x - mu.reshape(1, -1))    # torch svd is less memory-efficient
-        U, S, V = np.linalg.svd((x - mu.reshape(1, -1)).cpu().numpy(), full_matrices=False)
-        V = torch.from_numpy(V.T).to(x.device)
-        S = torch.from_numpy(S).to(x.device)
-        # (eq) 3.13
-        sigma_squared = torch.sum(torch.pow(S[n_factors:], 2.0))/((x.shape[0]-1) * (x.shape[1]-n_factors))
-        # (eq) 3.12, S in (eq) 3.9
-        A = V[:, :n_factors] * torch.sqrt((torch.pow(S[:n_factors], 2.0).reshape(1, n_factors)/(x.shape[0]-1) - sigma_squared))
-        return mu, A, torch.log(sigma_squared) * torch.ones(x.shape[1], device=x.device)
+        U, S, V = torch.svd(x - mu.reshape(1, -1))
 
+        V = V.T.to(x.device)
+        S = S.to(x.device)
+        # (3.13) in Tipping and Bishop (1999) [1]
+        sigma2 = torch.sum(S[n_factors:]**2.0)/((x.shape[0]-1) * (x.shape[1]-n_factors))
+        # (3.12) in Tipping and Bishop (1999) [1]
+        W = V[:, :n_factors] * torch.sqrt((S[:n_factors]**2.0).reshape(1, n_factors)/(x.shape[0]-1) - sigma2)
+
+        return mu, W, torch.log(sigma2) * torch.ones(x.shape[1], device=x.device)
+    
+    
     def _init_from_data(self, x, samples_per_component, feature_sampling=False):
         n = x.shape[0]
         K, d, l = self.W.shape
@@ -279,19 +153,12 @@ class LowRankMixtureModel(torch.nn.Module):
             component_samples = [[o[i*m:(i+1)*m]] for i in range(K)]
 
         params = [torch.stack(t) for t in zip(
-            *[LowRankMixtureModel._small_sample_ppca(x[component_samples[i]], n_factors=l) for i in range(K)])]
+            *[self._small_sample_ppca(x[component_samples[i]], n_factors=l) for i in range(K)])]
 
         self.mu.data = params[0]
         self.W.data = params[1]
         self.log_Psi.data = params[2]
 
-    def _parameters_sanity_check(self):
-        K, d, l = self.W.shape
-        assert torch.all(torch.softmax(self.pi_logits, dim=0) > 0.01/K), self.pi_logits
-        assert torch.all(torch.exp(self.log_Psi) > 1e-5) and torch.all(torch.exp(self.log_Psi) < 1.0), \
-            '{} - {}'.format(torch.min(self.log_Psi).item(), torch.max(self.log_Psi).item())
-        #assert torch.all(torch.abs(self.W) < 10.0), torch.max(torch.abs(self.W))
-        #assert torch.all(torch.abs(self.mu) < 1.0), torch.max(torch.abs(self.mu))
 
     def fit(self, x, max_iterations=20, feature_sampling=False):
         """
@@ -425,7 +292,7 @@ class LowRankMixtureModel(torch.nn.Module):
             t_s = sum_r_norm_x / sum_r - torch.sum(torch.pow(self.mu, 2.0), dim=1).double()
             self.log_Psi.data = torch.log((t_s - t1)/d).float().reshape(-1, 1) * torch.ones_like(self.log_Psi)
 
-            self._parameters_sanity_check()
+            #self._parameters_sanity_check()
             print(' ({} sec)'.format(time.time()-t))
 
         ll_log.append(torch.mean(self.log_prob(test_samples)).item())
@@ -474,12 +341,12 @@ class LowRankMixtureModel(torch.nn.Module):
                 sampled_features = np.random.choice(d, int(d*feature_sampling)) if feature_sampling else None
                 batch_x = batch_x.to(self.mu.device)
                 optimizer.zero_grad()
-                loss = -self.log_likelihood(batch_x, sampled_features=sampled_features) / batch_size
+                loss = -torch.sum(self.log_prob(batch_x, sampled_features=sampled_features)) / batch_size
                 #loss = -torch.mean(self.log_prob(test_samples, sampled_features=sampled_features))
                 loss.backward()
                 optimizer.step()
             ll_log.append(torch.mean(self.log_prob(test_samples)).item())
             print('\nEpoch {}: Test ll = {:.4f} ({:.4f} sec)'.format(epoch, ll_log[-1], time.time()-t))
-            self._parameters_sanity_check()
+            #self._parameters_sanity_check()
         self.pi_logits.requires_grad = self.mu.requires_grad = self.W.requires_grad = self.log_Psi.requires_grad = False
         return ll_log

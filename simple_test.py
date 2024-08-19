@@ -100,13 +100,13 @@ X_train = generate_test_data(n_samples, n_components, n_features, n_factors, noi
 X_train.to(device)
 y = torch.randint(10, (n_samples,))
 
-#model = MPPCA(n_components=n_components, n_features=n_features, n_factors=n_factors).to(device)
+#model = MFA(n_components=n_components, n_features=n_features, n_factors=n_factors).to(device)
 model = LowRankMixtureModel(n_components=n_components, n_features=n_features, n_factors=n_factors).to(device)
 
 dataset = ToyDataset(X_train, y)
 
-ll_log = model.fit(X_train, max_iterations=100)
-#ll_log = model.batch_fit(dataset, max_iterations=100, batch_size=256)
+ll_log = model.fit(X_train, max_iterations=250, feature_sampling=feature_sampling)
+#ll_log = model.batch_fit(dataset, max_iterations=100, batch_size=256, feature_sampling=feature_sampling)
 
 X_samples, _ = model.sample(n_plot, with_noise=True)
 
@@ -125,9 +125,9 @@ plt.ylabel("Log-Likelihood")
 plt.show()
 
 # plot sample comparison
-fig, axes = plt.subplots(n_features, 2*n_features, figsize=(30, 15))
-plot_data(n_features, X_train[:n_plot], axes[:, :n_features], color=pastelBlue)
-plot_data(n_features, X_samples[:n_plot], axes[:, n_features:],  color=pastelRed)
+fig, axes = plt.subplots(n_features, n_features, figsize=(30, 15))
+plot_data(n_features, X_train[:n_plot], axes[:, :], color=pastelBlue)
+plot_data(n_features, X_samples[:n_plot], axes[:, :],  color=pastelRed)
 fig.text(0.3, 0.9, 'Truth Data', ha='left', va='center', fontsize=20)
 fig.text(0.7, 0.9, 'Learned Model', ha='center', va='center', fontsize=20)
 plt.savefig("model_eval.png")
