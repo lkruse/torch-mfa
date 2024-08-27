@@ -59,10 +59,10 @@ class MFA(torch.nn.Module):
         self.init_method = init_method
         self.isotropic_noise = isotropic_noise
 
-        self.MU = torch.nn.Parameter(torch.zeros(n_components, n_features), requires_grad=False)
-        self.A = torch.nn.Parameter(torch.zeros(n_components, n_features, n_factors), requires_grad=False)
-        self.log_D = torch.nn.Parameter(torch.zeros(n_components, n_features), requires_grad=False)
-        self.PI_logits = torch.nn.Parameter(torch.log(torch.ones(n_components)/float(n_components)), requires_grad=False)
+        self.mu = torch.nn.Parameter(torch.zeros(n_components, n_features), requires_grad=False)
+        self.W = torch.nn.Parameter(torch.zeros(n_components, n_features, n_factors), requires_grad=False)
+        self.log_Psi = torch.nn.Parameter(torch.zeros(n_components, n_features), requires_grad=False)
+        self.pi_logits = torch.nn.Parameter(torch.log(torch.ones(n_components)/float(n_components)), requires_grad=False)
 
 
     def sample(self, n, with_noise=False):
@@ -72,14 +72,14 @@ class MFA(torch.nn.Module):
         :param with_noise: Add the isotropic / diagonal noise to the generated samples
         :return: samples [n, n_features], c_nums - originating component numbers
         """
-        if torch.all(self.A == 0.):
+        if torch.all(self.W == 0.):
             warnings.warn('SGD MFA training requires initialization. Please call batch_fit() first.')
 
-        K, d, l = self.A.shape
-        c_nums = np.random.choice(K, n, p=torch.softmax(self.PI_logits, dim=0).detach().cpu().numpy())
-        z_l = torch.randn(n, l, device=self.A.device)
-        z_d = torch.randn(n, d, device=self.A.device) if with_noise else torch.zeros(n, d, device=self.A.device)
-        samples = torch.stack([self.A[c_nums[i]] @ z_l[i] + self.MU[c_nums[i]] + z_d[i] * torch.exp(0.5*self.log_D[c_nums[i]])
+        K, d, l = self.W.shape
+        c_nums = np.random.choice(K, n, p=torch.softmax(self.pi_logits, dim=0).detach().cpu().numpy())
+        z_l = torch.randn(n, l, device=self.W.device)
+        z_d = torch.randn(n, d, device=self.W.device) if with_noise else torch.zeros(n, d, device=self.W.device)
+        samples = torch.stack([self.W[c_nums[i]] @ z_l[i] + self.mu[c_nums[i]] + z_d[i] * torch.exp(0.5*self.log_Psi[c_nums[i]])
                                for i in range(n)])
         return samples, c_nums
 
@@ -115,11 +115,11 @@ class MFA(torch.nn.Module):
         :return: log-probability values [n, n_components]
         """
         if sampled_features is not None:
-            return MFA._component_log_likelihood(x[:, sampled_features], torch.softmax(self.PI_logits, dim=0),
-                                                 self.MU[:, sampled_features],
-                                                 self.A[:, sampled_features],
-                                                 self.log_D[:, sampled_features])
-        return MFA._component_log_likelihood(x, torch.softmax(self.PI_logits, dim=0), self.MU, self.A, self.log_D)
+            return MFA._component_log_likelihood(x[:, sampled_features], torch.softmax(self.pi_logits, dim=0),
+                                                 self.mu[:, sampled_features],
+                                                 self.W[:, sampled_features],
+                                                 self.log_Psi[:, sampled_features])
+        return MFA._component_log_likelihood(x, torch.softmax(self.pi_logits, dim=0), self.mu, self.W, self.log_Psi)
 
     def log_prob(self, x, sampled_features=None):
         """
@@ -181,17 +181,17 @@ class MFA(torch.nn.Module):
         :return: A cloned version of full_x with the hidden features reconstructed
         """
         assert observed_features is not None
-        K, d, l = self.A.shape
+        K, d, l = self.W.shape
         c_i = self.map_component(full_x, observed_features)
 
         mask = torch.zeros(d, dtype=bool)
         mask[observed_features] = True
 
-        A_a = self.A[c_i][:, ~mask, :]
-        A_b = self.A[c_i][:, mask, :]
-        MU_a = self.MU[c_i][:, ~mask]
-        MU_b = self.MU[c_i][:, mask]
-        iD_b = torch.exp(-self.log_D[c_i][:, mask]).unsqueeze(2)
+        A_a = self.W[c_i][:, ~mask, :]
+        A_b = self.W[c_i][:, mask, :]
+        MU_a = self.mu[c_i][:, ~mask]
+        MU_b = self.mu[c_i][:, mask]
+        iD_b = torch.exp(-self.log_Psi[c_i][:, mask]).unsqueeze(2)
 
         iL_b = torch.inverse(torch.eye(l, device=MU_b.device).reshape(1, l, l) + A_b.transpose(1, 2) @ (iD_b*A_b))
         x_b_l = ((A_b * iD_b).transpose(1,2) @ (full_x[:, mask] - MU_b).unsqueeze(2))
@@ -208,15 +208,15 @@ class MFA(torch.nn.Module):
         :param observed_features: tensor containing a list of the observed coordinates of x
         :return: Reconstruction of full_x based on the trained model and observed features
         """
-        K, d, l = self.A.shape
+        K, d, l = self.W.shape
         c_i = self.map_component(full_x, observed_features)
 
         used_features = observed_features if observed_features is not None else torch.arange(0, d)
         x = full_x[:, used_features]
-        MU = self.MU[:, used_features]
-        A = self.A[:, used_features]
+        MU = self.mu[:, used_features]
+        A = self.W[:, used_features]
         AT = A.transpose(1, 2)
-        iD = torch.exp(-self.log_D[:, used_features]).unsqueeze(2)
+        iD = torch.exp(-self.log_Psi[:, used_features]).unsqueeze(2)
         L = torch.eye(l, device=MU.device).reshape(1, l, l) + AT @ (iD*A)
         iL = torch.inverse(L)
 
@@ -225,7 +225,7 @@ class MFA(torch.nn.Module):
         iD_c = iD[c_i]
         m_d_1 = (iD_c * x_c) - ((iD_c * A[c_i]) @ iL[c_i]) @ (AT[c_i] @ (iD_c * x_c))
         mu_z = AT[c_i] @ m_d_1
-        return (self.A[c_i] @ mu_z).reshape(-1, d) + self.MU[c_i]
+        return (self.W[c_i] @ mu_z).reshape(-1, d) + self.mu[c_i]
 
     @staticmethod
     def _small_sample_ppca(x, n_factors):
@@ -243,7 +243,7 @@ class MFA(torch.nn.Module):
 
     def _init_from_data(self, x, samples_per_component, feature_sampling=False):
         n = x.shape[0]
-        K, d, l = self.A.shape
+        K, d, l = self.W.shape
 
         if self.init_method == 'kmeans':
             # Import this only if 'kmeans' method was selected (not sure this is a good practice...)
@@ -266,17 +266,17 @@ class MFA(torch.nn.Module):
         params = [torch.stack(t) for t in zip(
             *[MFA._small_sample_ppca(x[component_samples[i]], n_factors=l) for i in range(K)])]
 
-        self.MU.data = params[0]
-        self.A.data = params[1]
-        self.log_D.data = params[2]
+        self.mu.data = params[0]
+        self.W.data = params[1]
+        self.log_Psi.data = params[2]
 
     def _parameters_sanity_check(self):
-        K, d, l = self.A.shape
-        assert torch.all(torch.softmax(self.PI_logits, dim=0) > 0.01/K), self.PI_logits
-        assert torch.all(torch.exp(self.log_D) > 1e-5) and torch.all(torch.exp(self.log_D) < 1.0), \
-            '{} - {}'.format(torch.min(self.log_D).item(), torch.max(self.log_D).item())
-        #assert torch.all(torch.abs(self.A) < 10.0), torch.max(torch.abs(self.A))
-        #assert torch.all(torch.abs(self.MU) < 1.0), torch.max(torch.abs(self.MU))
+        K, d, l = self.W.shape
+        assert torch.all(torch.softmax(self.pi_logits, dim=0) > 0.01/K), self.pi_logits
+        assert torch.all(torch.exp(self.log_Psi) > 1e-5) and torch.all(torch.exp(self.log_Psi) < 1.0), \
+            '{} - {}'.format(torch.min(self.log_Psi).item(), torch.max(self.log_Psi).item())
+        #assert torch.all(torch.abs(self.W) < 10.0), torch.max(torch.abs(self.W))
+        #assert torch.all(torch.abs(self.mu) < 1.0), torch.max(torch.abs(self.mu))
 
     def fit(self, x, max_iterations=20, feature_sampling=False):
         """
@@ -288,9 +288,11 @@ class MFA(torch.nn.Module):
         """
         assert self.isotropic_noise, 'EM fitting is currently supported for isotropic noise (MPPCA) only'
         assert not feature_sampling or type(feature_sampling) == float, 'set to desired sampling ratio'
-        K, d, l = self.A.shape
+        K, d, l = self.W.shape
         N = x.shape[0]
 
+        x = x.to(self.mu.device)
+        
         print('Random init...')
         init_samples_per_component = (l+1)*2 if self.init_method == 'rnd_samples' else (l+1)*10
         self._init_from_data(x, samples_per_component=init_samples_per_component,
@@ -299,16 +301,16 @@ class MFA(torch.nn.Module):
 
         def per_component_m_step(i):
             mu_i = torch.sum(r[:, [i]] * x, dim=0) / r_sum[i]
-            s2_I = torch.exp(self.log_D[i, 0]) * torch.eye(l, device=x.device)
-            inv_M_i = torch.inverse(self.A[i].T @ self.A[i] + s2_I)
+            s2_I = torch.exp(self.log_Psi[i, 0]) * torch.eye(l, device=x.device)
+            inv_M_i = torch.inverse(self.W[i].T @ self.W[i] + s2_I)
             x_c = x - mu_i.reshape(1, d)
-            SiAi = (1.0/r_sum[i]) * (r[:, [i]]*x_c).T @ (x_c @ self.A[i])
-            invM_AT_Si_Ai = inv_M_i @ self.A[i].T @ SiAi
+            SiAi = (1.0/r_sum[i]) * (r[:, [i]]*x_c).T @ (x_c @ self.W[i])
+            invM_AT_Si_Ai = inv_M_i @ self.W[i].T @ SiAi
             A_i_new = SiAi @ torch.inverse(s2_I + invM_AT_Si_Ai)
             t1 = torch.trace(A_i_new.T @ (SiAi @ inv_M_i))   # (eq) 6 in [2]
             trace_S_i = torch.sum(N/r_sum[i] * torch.mean(r[:, [i]]*x_c*x_c, dim=0)) # (eq) 6 in [2]
             sigma_2_new = (trace_S_i - t1)/d # (eq) 6 in [2]
-            return mu_i, A_i_new, torch.log(sigma_2_new) * torch.ones_like(self.log_D[i])
+            return mu_i, A_i_new, torch.log(sigma_2_new) * torch.ones_like(self.log_Psi[i])
 
 
         ll_log = []
@@ -318,10 +320,10 @@ class MFA(torch.nn.Module):
             r = self.responsibilities(x, sampled_features=sampled_features)
             r_sum = torch.sum(r, dim=0)
             new_params = [torch.stack(t) for t in zip(*[per_component_m_step(i) for i in range(K)])]
-            self.MU.data = new_params[0]
-            self.A.data = new_params[1]
-            self.log_D.data = new_params[2]
-            self.PI_logits.data = torch.log(r_sum / torch.sum(r_sum))
+            self.mu.data = new_params[0]
+            self.W.data = new_params[1]
+            self.log_Psi.data = new_params[2]
+            self.pi_logits.data = torch.log(r_sum / torch.sum(r_sum))
             ll = round(torch.mean(self.log_prob(x)).item(), 1) #if it % 5 == 0 else '.....'
             print('Iteration {}/{}, train log-likelihood = {}, took {:.1f} sec'.format(it, max_iterations, ll,
                                                                                    time.time()-t))
@@ -352,22 +354,22 @@ class MFA(torch.nn.Module):
        """
         assert self.isotropic_noise, 'EM fitting is currently supported for isotropic noise (MPPCA) only'
         assert not feature_sampling or type(feature_sampling) == float, 'set to desired sampling ratio'
-        K, d, l = self.A.shape
+        K, d, l = self.W.shape
 
         init_samples_per_component = (l+1)*2 if self.init_method == 'rnd_samples' else (l+1)*10
         print('Random init using {} with {} samples per component...'.format(self.init_method, init_samples_per_component))
         init_keys = [key for i, key in enumerate(RandomSampler(train_dataset)) if i < init_samples_per_component*K]
         init_samples, _ = zip(*[train_dataset[key] for key in init_keys])
-        self._init_from_data(torch.stack(init_samples).to(self.MU.device),
+        self._init_from_data(torch.stack(init_samples).to(self.mu.device),
                              samples_per_component=init_samples_per_component,
                              feature_sampling=feature_sampling/2 if feature_sampling else False)
 
         # Read some test samples for test likelihood calculation
-        # test_samples, _ = zip(*[test_dataset[key] for key in RandomSampler(test_dataset, num_samples=test_size, replacement=True)])
-        test_dataset = test_dataset or train_dataset
-        all_test_keys = [key for key in SequentialSampler(test_dataset)]
-        test_samples, _ = zip(*[test_dataset[key] for key in all_test_keys[:test_size]])
-        test_samples = torch.stack(test_samples).to(self.MU.device)
+        test_samples, _ = zip(*[test_dataset[key] for key in RandomSampler(test_dataset, num_samples=test_size, replacement=True)])
+        #test_dataset = test_dataset or train_dataset
+        #all_test_keys = [key for key in SequentialSampler(test_dataset)]
+        #test_samples, _ = zip(*[test_dataset[key] for key in all_test_keys[:test_size]])
+        test_samples = torch.stack(test_samples).to(self.mu.device)
 
         ll_log = []
         loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=8)
@@ -375,17 +377,17 @@ class MFA(torch.nn.Module):
             t = time.time()
 
             # Sufficient statistics
-            sum_r = torch.zeros(size=[K], dtype=torch.float64, device=self.MU.device)
-            sum_r_x = torch.zeros(size=[K, d], dtype=torch.float64, device=self.MU.device)
-            sum_r_x_x_A = torch.zeros(size=[K, d, l], dtype=torch.float64, device=self.MU.device)
-            sum_r_norm_x = torch.zeros(K, dtype=torch.float64, device=self.MU.device)
+            sum_r = torch.zeros(size=[K], dtype=torch.float64, device=self.mu.device)
+            sum_r_x = torch.zeros(size=[K, d], dtype=torch.float64, device=self.mu.device)
+            sum_r_x_x_A = torch.zeros(size=[K, d, l], dtype=torch.float64, device=self.mu.device)
+            sum_r_norm_x = torch.zeros(K, dtype=torch.float64, device=self.mu.device)
 
             ll_log.append(torch.mean(self.log_prob(test_samples)).item())
             print('Iteration {}/{}, log-likelihood={}:'.format(it, max_iterations, ll_log[-1]))
 
             for batch_x, _ in loader:
                 print('E', end='', flush=True)
-                batch_x = batch_x.to(self.MU.device)
+                batch_x = batch_x.to(self.mu.device)
                 sampled_features = np.random.choice(d, int(d*feature_sampling)) if feature_sampling else None
                 batch_r = self.responsibilities(batch_x, sampled_features=sampled_features)
                 sum_r += torch.sum(batch_r, dim=0).double()
@@ -393,22 +395,22 @@ class MFA(torch.nn.Module):
                 for i in range(K):
                     batch_r_x = batch_r[:, [i]] * batch_x
                     sum_r_x[i] += torch.sum(batch_r_x, dim=0).double()
-                    sum_r_x_x_A[i] += (batch_r_x.T @ (batch_x @ self.A[i])).double()
+                    sum_r_x_x_A[i] += (batch_r_x.T @ (batch_x @ self.W[i])).double()
 
             print(' / M...', end='', flush=True)
-            self.PI_logits.data = torch.log(sum_r / torch.sum(sum_r)).float()
-            self.MU.data = (sum_r_x / sum_r.reshape(-1, 1)).float()
+            self.pi_logits.data = torch.log(sum_r / torch.sum(sum_r)).float()
+            self.mu.data = (sum_r_x / sum_r.reshape(-1, 1)).float()
             SA = sum_r_x_x_A / sum_r.reshape(-1, 1, 1) - \
-                 (self.MU.reshape(K, d, 1) @ (self.MU.reshape(K, 1, d) @ self.A)).double()
-            s2_I = torch.exp(self.log_D[:, 0]).reshape(K, 1, 1) * torch.eye(l, device=self.MU.device).reshape(1, l, l)
-            M = (self.A.transpose(1, 2) @ self.A + s2_I).double()
+                 (self.mu.reshape(K, d, 1) @ (self.mu.reshape(K, 1, d) @ self.W)).double()
+            s2_I = torch.exp(self.log_Psi[:, 0]).reshape(K, 1, 1) * torch.eye(l, device=self.mu.device).reshape(1, l, l)
+            M = (self.W.transpose(1, 2) @ self.W + s2_I).double()
             inv_M = torch.stack([torch.inverse(M[i]) for i in range(K)])   # (K, l, l)
-            invM_AT_S_A = inv_M @ self.A.double().transpose(1, 2) @ SA   # (K, l, l)
-            self.A.data = torch.stack([(SA[i] @ torch.inverse(s2_I[i].double() + invM_AT_S_A[i])).float()
+            invM_AT_S_A = inv_M @ self.W.double().transpose(1, 2) @ SA   # (K, l, l)
+            self.W.data = torch.stack([(SA[i] @ torch.inverse(s2_I[i].double() + invM_AT_S_A[i])).float()
                                        for i in range(K)])
-            t1 = torch.stack([torch.trace(self.A[i].double().T @ (SA[i] @ inv_M[i])) for i in range(K)])
-            t_s = sum_r_norm_x / sum_r - torch.sum(torch.pow(self.MU, 2.0), dim=1).double()
-            self.log_D.data = torch.log((t_s - t1)/d).float().reshape(-1, 1) * torch.ones_like(self.log_D)
+            t1 = torch.stack([torch.trace(self.W[i].double().T @ (SA[i] @ inv_M[i])) for i in range(K)])
+            t_s = sum_r_norm_x / sum_r - torch.sum(torch.pow(self.mu, 2.0), dim=1).double()
+            self.log_Psi.data = torch.log((t_s - t1)/d).float().reshape(-1, 1) * torch.ones_like(self.log_Psi)
 
             self._parameters_sanity_check()
             print(' ({} sec)'.format(time.time()-t))
@@ -428,21 +430,21 @@ class MFA(torch.nn.Module):
         :param max_epochs: number of epochs
         :param feature_sampling: allows faster responsibility calculation by sampling data coordinates
         """
-        if torch.all(self.A == 0.):
+        if torch.all(self.W == 0.):
             warnings.warn('SGD MFA training requires initialization. Please call batch_fit() first.')
         if self.isotropic_noise:
             warnings.warn('Currently, SGD training uses diagonal (non-isotropic) noise covariance i.e. MFA and not MPPCA')
         assert not feature_sampling or type(feature_sampling) == float, 'set to desired sampling ratio'
-        # self.PI_logits.requires_grad =
-        self.MU.requires_grad = self.A.requires_grad = self.log_D.requires_grad = True
-        K, d, l = self.A.shape
+        # self.pi_logits.requires_grad =
+        self.mu.requires_grad = self.W.requires_grad = self.log_Psi.requires_grad = True
+        K, d, l = self.W.shape
 
         # Read some test samples for test likelihood calculation
         # test_samples, _ = zip(*[test_dataset[key] for key in RandomSampler(test_dataset, num_samples=test_size, replacement=True)])
         test_dataset = test_dataset or train_dataset
         all_test_keys = [key for key in SequentialSampler(test_dataset)]
         test_samples, _ = zip(*[test_dataset[key] for key in all_test_keys[:test_size]])
-        test_samples = torch.stack(test_samples).to(self.MU.device)
+        test_samples = torch.stack(test_samples).to(self.mu.device)
 
         optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
         loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=8)
@@ -457,7 +459,7 @@ class MFA(torch.nn.Module):
                     print("Loss {:.8f}".format(torch.mean(self.log_prob(test_samples)).item()))
                     #print(torch.mean(self.log_prob(test_samples)).item())
                 sampled_features = np.random.choice(d, int(d*feature_sampling)) if feature_sampling else None
-                batch_x = batch_x.to(self.MU.device)
+                batch_x = batch_x.to(self.mu.device)
                 optimizer.zero_grad()
                 loss = -self.log_likelihood(batch_x, sampled_features=sampled_features) / batch_size
                 #loss = -torch.mean(self.log_prob(test_samples, sampled_features=sampled_features))
@@ -466,5 +468,5 @@ class MFA(torch.nn.Module):
             ll_log.append(torch.mean(self.log_prob(test_samples)).item())
             print('\nEpoch {}: Test ll = {} ({} sec)'.format(epoch, ll_log[-1], time.time()-t))
             self._parameters_sanity_check()
-        self.PI_logits.requires_grad = self.MU.requires_grad = self.A.requires_grad = self.log_D.requires_grad = False
+        self.pi_logits.requires_grad = self.mu.requires_grad = self.W.requires_grad = self.log_Psi.requires_grad = False
         return ll_log

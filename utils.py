@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from mfa import MFA
+from my_mfa import LowRankMixtureModel
 
 
 class ReshapeTransform:
@@ -44,9 +45,9 @@ def samples_to_mosaic(samples, image_shape=[64, 64, 3]):
     return np.vstack(rows)
 
 
-def visualize_model(model: MFA, image_shape=[64, 64, 3], start_component=0, end_component=None):
+def visualize_model(model, image_shape=[64, 64, 3], start_component=0, end_component=None):
     assert len(image_shape) == 2 or (len(image_shape) == 3 and image_shape[2] > 1)
-    K, d, l = model.A.shape
+    K, d, l = model.W.shape
     h, w = image_shape[:2]
     spacer = min(8, w//8)
     end_component = end_component or min(K, 2048//(w*3+2+spacer))
@@ -63,15 +64,15 @@ def visualize_model(model: MFA, image_shape=[64, 64, 3], start_component=0, end_
     for c_num in range(start_component, end_component):
         x_start = (c_num-start_component)*(w*3+2+spacer)
 
-        mu = model.MU[c_num]
+        mu = model.mu[c_num]
         canvas[:h, x_start+w//2:x_start+w//2+w] = to_im(mu)
 
-        D = torch.exp(0.5*model.log_D[c_num])
+        D = torch.exp(0.5*model.log_Psi[c_num])
         canvas[:h, x_start+w//2+w+2:x_start+w//2+2*w+2] = to_im(D / torch.max(D))
 
         for i in range(l):
             y_start = (i+1)*(h+1)
-            A_i = model.A[c_num, :, i]
+            A_i = model.W[c_num, :, i]
             canvas[y_start:y_start+h, x_start:x_start+w] = to_im(mu + z * A_i)
             canvas[y_start:y_start+h, x_start+w+1:x_start+2*w+1] = to_im(0.5 + z * A_i)
             canvas[y_start:y_start+h, x_start+2*w+2:x_start+3*w+2] = to_im(mu - z * A_i)
